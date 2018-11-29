@@ -1,4 +1,5 @@
 with Ada.Containers.Indefinite_Vectors;
+with Ada.Containers.Vectors;
 with Ada.Text_IO;
 with Ada.Directories;
 with Dynamic_Pools;
@@ -6,7 +7,7 @@ with Standard_Extensions;
 with Ada.Streams.Stream_IO;
 with XML_DOM_Parser;
 with Zip;
-with UnZip;
+with UnZip.Streams;
 with GNAT.OS_Lib;
 with Worksheet_XML_Readers.Contents_Readers;
 with Shared_Strings_XML_Readers;
@@ -15,11 +16,14 @@ procedure Main is
 
    use Standard_Extensions;
 
+   use type Ada.Containers.Count_Type;
+
    package Stream_IO renames Ada.Streams.Stream_IO;
 
    subtype Stream_Element is Ada.Streams.Stream_Element;
 
    use all type XML_DOM_Parser.Node_Kind_Id;
+   use all type Unzip.Streams.Zipped_File_Type;
 
    package String_Vectors is new Ada.Containers.Indefinite_Vectors
      (Index_Type   => Positive,
@@ -51,37 +55,7 @@ procedure Main is
    Shared_Strings_Subpool : constant not null Dynamic_Pools.Subpool_Handle
      := Scoped_Shared_Strings_Subpool.Handle;
 
-   procedure Unzip_Countries_Excel_File;
    procedure Read_Shared_Strings_File;
-
-   procedure Unzip_Countries_Excel_File is
-
-      function Make_Path
-        (File_Name     : String;
-         Name_encoding : Zip.Zip_name_encoding) return String;
-
-      function Make_Path
-        (File_Name     : String;
-         Name_encoding : Zip.Zip_name_encoding) return String
-      is
-         pragma Unreferenced (Name_encoding);
-      begin
-         return (Countries_Directory & GNAT.OS_Lib.Directory_Separator &
-                   File_Name);
-      end Make_Path;
-
-   begin
-      UnZip.Extract
-        (from => "countries.xlsx",
-         file_system_routines =>
-           (Ada.Directories.Create_Path'Access,
-            null,
-            Make_Path'Unrestricted_Access,
-            null));
-      Ada.Text_IO.Put_Line
-        ("Successfully unzipped the countries.xlsx-file.");
-      Read_Shared_Strings_File;
-   end Unzip_Countries_Excel_File;
 
    Shared_Strings_Root_Node : XML_DOM_Parser.Node_Ptr;
 
@@ -94,52 +68,66 @@ procedure Main is
         := Countries_Directory & GNAT.OS_Lib.Directory_Separator &
         "xl" & GNAT.OS_Lib.Directory_Separator & "sharedStrings.xml";
 
-      File_Size : Natural;
-
-      File_Contents : String_Ptr;
-
-      procedure Allocate_Space;
       procedure Read_Contents;
       procedure Parse_Contents;
       procedure Populate_Map;
 
-      procedure Allocate_Space is
-      begin
-         File_Size := Natural (Ada.Directories.Size (File_Name));
+      File_Contents : String_Ptr;
 
-         if File_Size > 4 then
+      procedure Read_Contents is
+         f: Unzip.Streams.Zipped_File_Type;  --  from UnZip.Streams
+         s: UnZip.Streams.Stream_Access;
+
+         package Stream_Vectors is new Ada.Containers.Vectors
+           (Index_Type   => Positive,
+            Element_Type => Character);
+         V : Stream_Vectors.Vector;
+         Read_Character : Character;
+      begin
+         V.Reserve_Capacity (1_000_000);
+         Open(f, "countries.xlsx", "xl/sharedStrings.xml");
+         s:= Stream(f);
+         while not End_Of_File(f) loop
+            Character'Read(s, Read_Character);
+            V.Append (Read_Character);
+         end loop;
+         Close(f);
+
+         if V.Length > 4 then
             File_Contents := new (Shared_Strings_Subpool) String
-              (1 .. File_Size);
-            Read_Contents;
+              (1 .. Positive (V.Length));
+            for I in Positive range 1 .. Positive (V.Length) loop
+               File_Contents (I) := V (I);
+            end loop;
+            Parse_Contents;
          else
             Ada.Text_IO.Put_Line ("File " & File_Name & " is too small!");
          end if;
-      end Allocate_Space;
+      end Read_Contents;
 
-      pragma Unmodified (File_Size);
       pragma Unmodified (File_Contents);
 
-      procedure Read_Contents is
-         File : Stream_IO.File_Type;
-         Element : Stream_Element;
-         Stream : Stream_IO.Stream_Access;
-
-         I : Positive := File_Contents.all'First;
-      begin
-         Stream_IO.Open (File, Stream_IO.In_File, File_Name);
-
-         Stream := Stream_IO.Stream (File);
-
-         while not Stream_IO.End_Of_File (File) loop
-            Stream_Element'Read (Stream, Element);
-            File_Contents (I) := Character'Val (Element);
-            I := I + 1;
-         end loop;
-
-         Stream_IO.Close (File);
-
-         Parse_Contents;
-      end Read_Contents;
+--        procedure Read_Contents is
+--           File : Stream_IO.File_Type;
+--           Element : Stream_Element;
+--           Stream : Stream_IO.Stream_Access;
+--
+--           I : Positive := File_Contents.all'First;
+--        begin
+--           Stream_IO.Open (File, Stream_IO.In_File, File_Name);
+--
+--           Stream := Stream_IO.Stream (File);
+--
+--           while not Stream_IO.End_Of_File (File) loop
+--              Stream_Element'Read (Stream, Element);
+--              File_Contents (I) := Character'Val (Element);
+--              I := I + 1;
+--           end loop;
+--
+--           Stream_IO.Close (File);
+--
+--           Parse_Contents;
+--        end Read_Contents;
 
       procedure Parse_Contents is
          Call_Result : Subprogram_Call_Result;
@@ -211,7 +199,7 @@ procedure Main is
       end Populate_Map;
 
    begin
-      Allocate_Space;
+      Read_Contents;
    end Read_Shared_Strings_File;
 
    pragma Unmodified (Shared_Strings_Root_Node);
@@ -226,54 +214,46 @@ procedure Main is
 
       procedure Read_Sheet1 is
          File_Name : constant String
-           := Countries_Directory & GNAT.OS_Lib.Directory_Separator &
-           "xl" & GNAT.OS_Lib.Directory_Separator &
+           := "xl" & GNAT.OS_Lib.Directory_Separator &
            "worksheets" & GNAT.OS_Lib.Directory_Separator & "sheet1.xml";
 
-         File_Size : Natural;
-
-         File_Contents : String_Ptr;
-
-         procedure Allocate_Space;
          procedure Read_Contents;
          procedure Parse_Contents;
 
-         procedure Allocate_Space is
-         begin
-            File_Size := Natural (Ada.Directories.Size (File_Name));
+         File_Contents : String_Ptr;
 
-            if File_Size > 4 then
-               File_Contents := new (Subpool) String (1 .. File_Size);
-               Read_Contents;
+         procedure Read_Contents is
+            f: Unzip.Streams.Zipped_File_Type;  --  from UnZip.Streams
+            s: UnZip.Streams.Stream_Access;
+
+            package Stream_Vectors is new Ada.Containers.Vectors
+              (Index_Type   => Positive,
+               Element_Type => Character);
+            V : Stream_Vectors.Vector;
+            Read_Character : Character;
+         begin
+            V.Reserve_Capacity (1_000_000);
+            Open(f, "countries.xlsx", File_Name);
+            s:= Stream(f);
+            while not End_Of_File(f) loop
+               Character'Read(s, Read_Character);
+               V.Append (Read_Character);
+            end loop;
+            Close(f);
+
+            if V.Length > 4 then
+               File_Contents := new (Shared_Strings_Subpool) String
+                 (1 .. Positive (V.Length));
+               for I in Positive range 1 .. Positive (V.Length) loop
+                  File_Contents (I) := V (I);
+               end loop;
+               Parse_Contents;
             else
                Ada.Text_IO.Put_Line ("File " & File_Name & " is too small!");
             end if;
-         end Allocate_Space;
-
-         pragma Unmodified (File_Size);
-         pragma Unmodified (File_Contents);
-
-         procedure Read_Contents is
-            File : Stream_IO.File_Type;
-            Element : Stream_Element;
-            Stream : Stream_IO.Stream_Access;
-
-            I : Positive := File_Contents.all'First;
-         begin
-            Stream_IO.Open (File, Stream_IO.In_File, File_Name);
-
-            Stream := Stream_IO.Stream (File);
-
-            while not Stream_IO.End_Of_File (File) loop
-               Stream_Element'Read (Stream, Element);
-               File_Contents (I) := Character'Val (Element);
-               I := I + 1;
-            end loop;
-
-            Stream_IO.Close (File);
-
-            Parse_Contents;
          end Read_Contents;
+
+         pragma Unmodified (File_Contents);
 
          procedure Parse_Contents is
             Statistics : Worksheet_XML_Readers.Statistics_Reader;
@@ -331,7 +311,7 @@ procedure Main is
          end Parse_Contents;
 
       begin
-         Allocate_Space;
+         Read_Contents;
       end Read_Sheet1;
 
       pragma Unmodified (Sheet1_Root_Node);
@@ -341,5 +321,5 @@ procedure Main is
    end Use_Map;
 
 begin
-   Unzip_Countries_Excel_File;
+   Read_Shared_Strings_File;
 end Main;
